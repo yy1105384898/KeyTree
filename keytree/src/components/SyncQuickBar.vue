@@ -7,6 +7,7 @@ const { vaultPath, unlocked, busy, drawer, hasUnsavedChanges, webdavState, webda
 watch([vaultPath, unlocked], () => { if (unlocked.value) void refreshWebdavAvailability(); }, { immediate: true });
 const disabled = computed(() => props.blocked || busy.value || drawer.value.open || webdavAvailability.value.loading);
 const lastUpload = computed(() => webdavState.value.lastSyncedAt ?? webdavAvailability.value.lastSyncedAt);
+const showMessage = computed(() => !webdavAvailability.value.configured || !!webdavAvailability.value.error || ["saving", "downloading", "merging", "uploading", "error", "conflict", "cancelled"].includes(webdavState.value.phase));
 const label = computed(() => {
   if (webdavAvailability.value.loading) return "读取同步配置…";
   if (webdavAvailability.value.error) return "重试检测";
@@ -18,7 +19,7 @@ const message = computed(() => {
   const config = webdavAvailability.value;
   if (config.loading) return "正在读取本机同步配置，不会连接网盘。";
   if (config.error) return config.error;
-  if (!config.configured) return "未配置 WebDAV · 仅本地使用，不会自动上传。";
+  if (!config.configured) return "未配置云端同步 · 仅本地使用，不会自动上传。";
   if (webdavState.value.phase === "unchecked" && hasUnsavedChanges.value) return "有本地修改待保存、待同步；尚未检查远端。";
   return webdavState.value.message;
 });
@@ -32,10 +33,9 @@ async function run() {
 <template>
   <div data-sync-quickbar :data-phase="webdavState.phase" class="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-stone-200 bg-[#faf6f1] px-4 py-2 text-xs">
     <div class="min-w-0 flex-1" role="status" aria-live="polite">
-      <p class="break-words leading-relaxed" :class="webdavAvailability.error || ['error', 'conflict'].includes(webdavState.phase) ? 'text-[#8b2332]' : 'text-stone-600'">{{ message }}</p>
-      <p v-if="lastUpload" class="mt-0.5 text-[10px] text-stone-400">上次上传确认：{{ new Date(lastUpload).toLocaleString('zh-CN', { hour12: false }) }} · 不代表远端当前一致</p>
+      <p v-if="showMessage" class="break-words leading-relaxed" :class="webdavAvailability.error || ['error', 'conflict'].includes(webdavState.phase) ? 'text-[#8b2332]' : 'text-stone-600'">{{ message }}</p>
     </div>
-    <button :disabled="disabled" class="shrink-0 rounded-full border border-stone-300 bg-white px-3 py-1.5 text-stone-700 disabled:opacity-50" @click="run">{{ label }}</button>
+    <button :disabled="disabled" :title="lastUpload ? `上次上传：${new Date(lastUpload).toLocaleString('zh-CN', { hour12: false })}` : ''" class="shrink-0 rounded-full border border-stone-300 bg-white px-3 py-1.5 text-stone-700 disabled:opacity-50" @click="run">{{ label }}</button>
     <button v-if="webdavAvailability.configured" :disabled="blocked || busy || drawer.open" class="shrink-0 text-stone-500 underline disabled:opacity-50" @click="emit('configure')">同步设置</button>
   </div>
 </template>

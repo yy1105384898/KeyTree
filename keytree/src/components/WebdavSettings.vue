@@ -9,10 +9,21 @@ const { vaultPath, unlocked, busy, hasUnsavedChanges, webdavState, syncWebdav, r
 const empty = (): WebdavConfig => ({ configured: false, url: "", username: "", hasPassword: false, lastSyncedAt: null });
 const config = ref<WebdavConfig>(empty());
 const url = ref(""), username = ref(""), password = ref(""), message = ref("");
+const provider = ref<"webdav" | "s3">("webdav"), s3Region = ref("");
+const s3Endpoint = ref(""), s3Bucket = ref(""), s3Object = ref("vault.kdbx");
 const working = ref(false), loaded = ref(false), allowCreate = ref(false), confirmForget = ref(false);
 const testing = ref(false);
 let generation = 0, disposed = false;
-const dirty = computed(() => loaded.value && (url.value !== config.value.url || username.value !== config.value.username || password.value !== ""));
+const s3Url = computed(() => {
+  try {
+    const endpoint = new URL(s3Endpoint.value.trim());
+    const bucket = s3Bucket.value.trim(), object = s3Object.value.trim();
+    if (!/^https?:$/.test(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || endpoint.pathname !== "/" || !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket) || !object.toLowerCase().endsWith(".kdbx") || object.split("/").some(part => !part || part === "." || part === "..")) return "";
+    endpoint.pathname = `${endpoint.pathname.replace(/\/+$/, "")}/${bucket}/${object.split("/").map(encodeURIComponent).join("/")}`;
+    return endpoint.toString();
+  } catch { return ""; }
+});
+const dirty = computed(() => loaded.value && ((provider.value === "s3" ? s3Url.value : url.value) !== config.value.url || username.value !== config.value.username || password.value !== "" || (provider.value === "s3" ? s3Region.value : "") !== (config.value.s3Region || "")));
 const isNutstore = computed(() => isNutstoreWebdavUrl(config.value.url));
 const lastUpload = computed(() => webdavState.value.lastSyncedAt ?? config.value.lastSyncedAt);
 const disabled = computed(() => !loaded.value || !unlocked.value || busy.value || working.value);
@@ -23,7 +34,14 @@ const syncOnLock = computed({
 watch(dirty, value => { confirmForget.value = false; emit("dirty", value); }, { immediate: true, flush: "sync" });
 watch(working, value => emit("working", value), { immediate: true, flush: "sync" });
 function apply(view: WebdavConfig) {
-  config.value = view; url.value = view.url; username.value = view.username; password.value = "";
+  config.value = view; url.value = view.url; username.value = view.username; password.value = ""; s3Region.value = view.s3Region || ""; provider.value = view.s3Region ? "s3" : "webdav";
+  s3Endpoint.value = ""; s3Bucket.value = ""; s3Object.value = "vault.kdbx";
+  if (view.s3Region && view.url) {
+    try {
+      const parsed = new URL(view.url), parts = parsed.pathname.split("/").filter(Boolean);
+      s3Endpoint.value = parsed.origin; s3Bucket.value = parts.shift() || ""; s3Object.value = parts.map(decodeURIComponent).join("/");
+    } catch { /* Invalid persisted configuration is reported by the backend. */ }
+  }
 }
 watch([vaultPath, unlocked], async () => {
   const ticket = ++generation, path = vaultPath.value;
@@ -47,7 +65,9 @@ async function action(kind: "save" | "test" | "sync" | "forget") {
   message.value = testing.value ? "正在只读检查远端文件和 ETag，不会上传…" : "";
   try {
     if (kind === "save") {
-      const view = await invoke<WebdavConfig>("webdav_save_config", { vaultPath: path, url: url.value.trim(), username: username.value.trim(), password: password.value === "" ? null : password.value });
+      if (provider.value === "s3" && !s3Region.value.trim()) { message.value = "请填写 S3 区域。"; return; }
+      if (provider.value === "s3" && !s3Url.value) { message.value = "请检查 Endpoint、Bucket 和 .kdbx 对象路径。"; return; }
+      const view = await invoke<WebdavConfig>("webdav_save_config", { vaultPath: path, url: provider.value === "s3" ? s3Url.value : url.value.trim(), username: username.value.trim(), password: password.value === "" ? null : password.value, s3Region: provider.value === "s3" ? s3Region.value.trim() : "" });
       if (disposed || ticket !== generation) return;
       apply(view); setWebdavConfigSummary(view); resetWebdavSyncStatus(); message.value = "配置已保存；尚未检查远端。";
     } else if (kind === "test") {
@@ -64,15 +84,17 @@ async function action(kind: "save" | "test" | "sync" | "forget") {
       syncOnLock.value = false;
       apply(empty()); setWebdavConfigSummary(empty()); confirmForget.value = false; resetWebdavSyncStatus(); message.value = "本机配置已删除，本地和云端库文件均未删除。";
     }
-  } catch (e) { if (!disposed && ticket === generation) message.value = webdavErrorMessage(e); }
+    } catch (e) { if (!disposed && ticket === generation) message.value = webdavErrorMessage(e); }
   finally { if (!disposed && ticket === generation) { password.value = ""; working.value = false; testing.value = false; } }
 }
 onBeforeUnmount(() => { disposed = true; generation++; password.value = ""; emit("dirty", false); emit("working", false); });
 </script>
 <template>
   <section class="space-y-4" data-webdav-settings>
-    <h4 class="font-serif text-sm font-semibold text-stone-800">WebDAV 同步</h4>
-    <details class="rounded-xl border border-stone-200 bg-white p-3 text-xs leading-relaxed text-stone-600" data-jianguoyun-help>
+    <h4 class="font-serif text-sm font-semibold text-stone-800">云端同步</h4>
+    <label class="block text-xs text-stone-600" for="sync-provider">服务类型</label>
+    <select id="sync-provider" v-model="provider" :disabled="disabled" class="w-full rounded-xl border border-stone-200 bg-white px-4 py-2.5 text-sm"><option value="webdav">WebDAV</option><option value="s3">S3 兼容存储</option></select>
+    <details v-if="provider === 'webdav'" class="rounded-xl border border-stone-200 bg-white p-3 text-xs leading-relaxed text-stone-600" data-jianguoyun-help>
       <summary class="cursor-pointer font-medium text-stone-700">坚果云配置帮助</summary>
       <div class="mt-3 space-y-2">
         <p>在坚果云安全设置的第三方应用管理中，为 KeyTree 生成应用密码；不要填写坚果云登录密码。</p>
@@ -83,11 +105,17 @@ onBeforeUnmount(() => { disposed = true; generation++; password.value = ""; emit
       </div>
     </details>
     <div class="space-y-3">
-      <label class="block text-xs text-stone-600" for="webdav-url">远端 KDBX 完整地址</label>
-      <input id="webdav-url" v-model="url" :disabled="disabled" type="url" autocomplete="off" spellcheck="false" placeholder="https://dav.jianguoyun.com/dav/目录/库名.kdbx" class="w-full rounded-xl border border-stone-200 bg-white px-4 py-2.5 text-sm" />
-      <label class="block text-xs text-stone-600" for="webdav-user">用户名</label>
+      <template v-if="provider === 'webdav'"><label class="block text-xs text-stone-600" for="webdav-url">远端 KDBX 完整地址</label><input id="webdav-url" v-model="url" :disabled="disabled" type="url" autocomplete="off" spellcheck="false" placeholder="https://dav.jianguoyun.com/dav/目录/库名.kdbx" class="w-full rounded-xl border border-stone-200 bg-white px-4 py-2.5 text-sm" /></template>
+      <template v-else>
+        <label class="block text-xs text-stone-600" for="s3-endpoint">Endpoint</label><input id="s3-endpoint" v-model="s3Endpoint" :disabled="disabled" type="url" autocomplete="off" spellcheck="false" class="w-full rounded-xl border border-stone-200 bg-white px-4 py-2.5 text-sm" />
+        <p v-if="s3Endpoint.trim().startsWith('http://')" class="text-xs text-amber-700">HTTP 传输未加密，请仅在可信内网使用。</p>
+        <label class="block text-xs text-stone-600" for="s3-bucket">Bucket</label><input id="s3-bucket" v-model="s3Bucket" :disabled="disabled" autocomplete="off" spellcheck="false" class="w-full rounded-xl border border-stone-200 bg-white px-4 py-2.5 text-sm" />
+        <label class="block text-xs text-stone-600" for="s3-object">云端密码库路径</label><input id="s3-object" v-model="s3Object" :disabled="disabled" autocomplete="off" spellcheck="false" class="w-full rounded-xl border border-stone-200 bg-white px-4 py-2.5 text-sm" />
+        <label class="block text-xs text-stone-600" for="s3-region">区域（Region）</label><input id="s3-region" v-model="s3Region" :disabled="disabled" autocomplete="off" spellcheck="false" class="w-full rounded-xl border border-stone-200 bg-white px-4 py-2.5 text-sm" />
+      </template>
+      <label class="block text-xs text-stone-600" for="webdav-user">{{ provider === 's3' ? 'Access Key ID' : '用户名' }}</label>
       <input id="webdav-user" v-model="username" :disabled="disabled" autocomplete="off" spellcheck="false" class="w-full rounded-xl border border-stone-200 bg-white px-4 py-2.5 text-sm" />
-      <label class="block text-xs text-stone-600" for="webdav-password">应用专用密码</label>
+      <label class="block text-xs text-stone-600" for="webdav-password">{{ provider === 's3' ? 'Secret Access Key' : '应用专用密码' }}</label>
       <input id="webdav-password" v-model="password" :disabled="disabled" type="password" autocomplete="new-password" :placeholder="config.hasPassword ? '已保存在本机；留空保留' : '填写服务提供的应用专用密码'" class="w-full rounded-xl border border-stone-200 bg-white px-4 py-2.5 text-sm" />
       <p class="text-[11px] text-stone-400">密码仅加密保存在本机。</p>
       <div class="flex flex-wrap gap-2">

@@ -12,8 +12,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/JJong177/KeyTree/releases/download/v0.2.0/KeyTree-Setup.exe"><img src="https://img.shields.io/badge/Download-Windows_x64_v0.2.0-657650?style=flat-square" alt="Download Windows x64 installer v0.2.0" height="28" /></a>
-  <a href="https://github.com/JJong177/KeyTree/releases/tag/v0.2.0"><img src="https://img.shields.io/badge/Release-Notes-5c4033?style=flat-square" alt="Read release notes" height="28" /></a>
+  <a href="https://github.com/yy1105384898/KeyTree/releases/download/v0.2.0-s3/KeyTree_0.2.0_x64-setup.exe"><img src="https://img.shields.io/badge/Download-Windows_x64_v0.2.0--s3-657650?style=flat-square" alt="Download Windows x64 installer v0.2.0-s3" height="28" /></a>
+  <a href="https://github.com/yy1105384898/KeyTree/releases/tag/v0.2.0-s3"><img src="https://img.shields.io/badge/Release-Notes-5c4033?style=flat-square" alt="Read release notes" height="28" /></a>
   <a href="https://linux.do/"><img src="https://img.shields.io/badge/LINUX_DO-Community-ffb000?style=flat-square&amp;logo=discourse&amp;logoColor=white&amp;labelColor=555555" alt="LINUX DO community" height="28" /></a>
 </p>
 
@@ -87,7 +87,7 @@ Windows Hello local quick unlock, idle locking, timed clipboard clearing and scr
 
 ### 1. Install KeyTree
 
-Download [`KeyTree-Setup.exe` from GitHub Releases](https://github.com/JJong177/KeyTree/releases/download/v0.2.0/KeyTree-Setup.exe), follow the wizard and launch **KeyTree**. The installed app does not require Node.js, Rust or a development server. The installer is a Release attachment, not part of the source tree. To build it yourself, see Development below.
+Download the [installer from GitHub Releases](https://github.com/yy1105384898/KeyTree/releases/download/v0.2.0-s3/KeyTree_0.2.0_x64-setup.exe), follow the wizard and launch **KeyTree**. The installed app does not require Node.js, Rust or a development server. The installer is a Release attachment, not part of the source tree. To build it yourself, see Development below.
 
 - **Runtime:** Microsoft Edge WebView2 Runtime. The installer attempts an online installation if it is missing.
 - **Installer language:** Simplified Chinese or English. This changes the installation wizard only, not the application UI.

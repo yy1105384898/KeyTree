@@ -7,6 +7,8 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use hmac::{Hmac, Mac};
+use sha2::{Digest, Sha256};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -50,6 +52,8 @@ struct ConfigEntry {
     username: String,
     encrypted_password: Vec<u8>,
     #[serde(default)]
+    s3_region: String,
+    #[serde(default)]
     revision: u64,
     #[serde(default)]
     last_synced_at: Option<u64>,
@@ -74,6 +78,7 @@ pub struct ConfigView {
     username: String,
     has_password: bool,
     last_synced_at: Option<u64>,
+    s3_region: String,
 }
 
 #[derive(Serialize)]
@@ -118,6 +123,7 @@ struct NetworkConfig {
     username: String,
     password: String,
     revision: u64,
+    s3_region: String,
 }
 
 struct RemoteSnapshot {
@@ -407,6 +413,23 @@ fn validate_url(raw: &str, allow_loopback_http: bool) -> Result<Url, String> {
     Ok(url)
 }
 
+fn validate_config_url(raw: &str, s3: bool, allow_loopback_http: bool) -> Result<Url, String> {
+    let url = Url::parse(raw).map_err(|_| WD_INVALID_URL.to_string())?;
+    if s3 && url.scheme() == "http" {
+        let host = url.host_str().ok_or_else(|| WD_INVALID_URL.to_string())?;
+        let private = host == "localhost" || host.parse::<std::net::IpAddr>().is_ok_and(|ip| match ip {
+            std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
+            std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
+        });
+        if !private { return Err(WD_INVALID_URL.to_string()); }
+        let mut secure = url.clone();
+        secure.set_scheme("https").map_err(|_| WD_INVALID_URL.to_string())?;
+        validate_url(secure.as_str(), false)?;
+        return Ok(url);
+    }
+    validate_url(raw, allow_loopback_http)
+}
+
 fn origin(url: &Url) -> String {
     url.origin().ascii_serialization()
 }
@@ -448,7 +471,7 @@ fn read_profile(path: &Path) -> Result<Profile, String> {
             || entry.encrypted_password.is_empty()
             || entry.encrypted_password.len() > MAX_PASSWORD_BYTES * 4
             || validate_username(&entry.username).is_err()
-            || validate_url(&entry.url, false).is_err()
+            || validate_config_url(&entry.url, !entry.s3_region.is_empty(), false).is_err()
         {
             return Err(WD_CONFIG_IO.to_string());
         }
@@ -505,6 +528,7 @@ fn config_view(entry: Option<&ConfigEntry>) -> ConfigView {
             username: entry.username.clone(),
             has_password: !entry.encrypted_password.is_empty(),
             last_synced_at: entry.last_synced_at,
+            s3_region: entry.s3_region.clone(),
         },
         None => ConfigView {
             configured: false,
@@ -512,6 +536,7 @@ fn config_view(entry: Option<&ConfigEntry>) -> ConfigView {
             username: String::new(),
             has_password: false,
             last_synced_at: None,
+            s3_region: String::new(),
         },
     }
 }
@@ -527,14 +552,23 @@ fn read_config_view(path: &Path, vault: &str) -> Result<ConfigView, String> {
     ))
 }
 
-fn save_config(
+#[cfg(test)]
+fn save_config(path: &Path, vault: &str, raw_url: &str, username: &str, password: Option<String>) -> Result<ConfigView, String> {
+    save_config_with_region(path, vault, raw_url, username, password, "")
+}
+
+fn save_config_with_region(
     path: &Path,
     vault: &str,
     raw_url: &str,
     username: &str,
     password: Option<String>,
+    s3_region: &str,
 ) -> Result<ConfigView, String> {
-    let url = validate_url(raw_url, false)?;
+    if s3_region.len() > 128 || !s3_region.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return Err(WD_INVALID_URL.to_string());
+    }
+    let url = validate_config_url(raw_url, !s3_region.is_empty(), false)?;
     validate_username(username)?;
     if let Some(ref password) = password {
         validate_password(password)?;
@@ -551,8 +585,8 @@ fn save_config(
             let index = existing_index.ok_or_else(|| WD_CREDENTIALS_REQUIRED.to_string())?;
             let previous = &profile.entries[index];
             let previous_url =
-                validate_url(&previous.url, false).map_err(|_| WD_CONFIG_IO.to_string())?;
-            if previous.username != username || origin(&previous_url) != origin(&url) {
+                validate_config_url(&previous.url, !previous.s3_region.is_empty(), false).map_err(|_| WD_CONFIG_IO.to_string())?;
+            if previous.username != username || origin(&previous_url) != origin(&url) || previous.s3_region != s3_region {
                 return Err(WD_CREDENTIALS_REQUIRED.to_string());
             }
             previous.encrypted_password.clone()
@@ -575,10 +609,11 @@ fn save_config(
         url: raw_url.to_string(),
         username: username.to_string(),
         encrypted_password,
+        s3_region: s3_region.to_string(),
         revision,
         last_synced_at: existing_index
             .filter(|&i| {
-                profile.entries[i].url == raw_url && profile.entries[i].username == username
+                profile.entries[i].url == raw_url && profile.entries[i].username == username && profile.entries[i].s3_region == s3_region
             })
             .and_then(|i| profile.entries[i].last_synced_at),
     };
@@ -620,6 +655,7 @@ fn load_network_config(path: &Path, vault: &str) -> Result<NetworkConfig, String
         username: entry.username.clone(),
         password,
         revision: entry.revision,
+        s3_region: entry.s3_region.clone(),
     })
 }
 
@@ -787,21 +823,68 @@ fn map_status(status: StatusCode) -> String {
     }
 }
 
+fn sign_s3(request: &mut reqwest::Request, config: &NetworkConfig) -> Result<(), String> {
+    if config.s3_region.is_empty() { return Ok(()); }
+    sign_s3_at(request, config, chrono::Utc::now())
+}
+
+fn sign_s3_at(request: &mut reqwest::Request, config: &NetworkConfig, now: chrono::DateTime<chrono::Utc>) -> Result<(), String> {
+    let url = request.url();
+    let host = match url.port() {
+        Some(port) => format!("{}:{port}", url.host_str().ok_or(WD_INVALID_URL)?),
+        None => url.host_str().ok_or(WD_INVALID_URL)?.to_string(),
+    };
+    let date = now.format("%Y%m%d").to_string();
+    let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let payload = match request.body() {
+        Some(body) => body.as_bytes().ok_or(WD_SERVER)?,
+        None => &[],
+    };
+    let hash = hex::encode(Sha256::digest(payload));
+    let mut signed_headers = String::from("host");
+    let mut canonical_headers = format!("host:{host}\n");
+    for name in ["if-match", "if-none-match"] {
+        if let Some(value) = request.headers().get(name) {
+            signed_headers.push(';'); signed_headers.push_str(name);
+            canonical_headers.push_str(&format!("{name}:{}\n", value.to_str().map_err(|_| WD_SERVER.to_string())?));
+        }
+    }
+    signed_headers.push_str(";x-amz-content-sha256;x-amz-date");
+    canonical_headers.push_str(&format!("x-amz-content-sha256:{hash}\nx-amz-date:{timestamp}\n"));
+    let canonical = format!("{}\n{}\n\n{}\n{}\n{}", request.method(), url.path(), canonical_headers, signed_headers, hash);
+    let scope = format!("{date}/{}/s3/aws4_request", config.s3_region);
+    let string_to_sign = format!("AWS4-HMAC-SHA256\n{timestamp}\n{scope}\n{}", hex::encode(Sha256::digest(canonical.as_bytes())));
+    fn mac(key: &[u8], data: &str) -> Result<Vec<u8>, String> {
+        let mut h = Hmac::<Sha256>::new_from_slice(key).map_err(|_| WD_SERVER.to_string())?;
+        h.update(data.as_bytes());
+        Ok(h.finalize().into_bytes().to_vec())
+    }
+    let key = mac(format!("AWS4{}", config.password).as_bytes(), &date)?;
+    let key = mac(&key, &config.s3_region)?;
+    let key = mac(&key, "s3")?;
+    let key = mac(&key, "aws4_request")?;
+    let signature = hex::encode(mac(&key, &string_to_sign)?);
+    let authorization = format!("AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed_headers}, Signature={signature}", config.username);
+    let headers = request.headers_mut();
+    headers.insert(header::HOST, header::HeaderValue::from_str(&host).map_err(|_| WD_INVALID_URL.to_string())?);
+    headers.insert("x-amz-date", header::HeaderValue::from_str(&timestamp).map_err(|_| WD_SERVER.to_string())?);
+    headers.insert("x-amz-content-sha256", header::HeaderValue::from_str(&hash).map_err(|_| WD_SERVER.to_string())?);
+    headers.insert(header::AUTHORIZATION, header::HeaderValue::from_str(&authorization).map_err(|_| WD_CREDENTIALS_REQUIRED.to_string())?);
+    Ok(())
+}
+
 async fn fetch_remote(
     client: &Client,
     config: &NetworkConfig,
     allow_loopback_http: bool,
     guard: Option<(&str, u64)>,
 ) -> Result<Option<ReadableRemote>, String> {
-    let url = validate_url(&config.url, allow_loopback_http)?;
-    let request = async {
-        client
-            .get(url)
-            .header(header::ACCEPT_ENCODING, "identity")
-            .basic_auth(&config.username, Some(&config.password))
-            .send()
-            .await
-    };
+    let url = validate_config_url(&config.url, !config.s3_region.is_empty(), allow_loopback_http)?;
+    let mut builder = client.get(url).header(header::ACCEPT_ENCODING, "identity");
+    if config.s3_region.is_empty() { builder = builder.basic_auth(&config.username, Some(&config.password)); }
+    let mut request = builder.build().map_err(|_| WD_SERVER.to_string())?;
+    sign_s3(&mut request, config)?;
+    let request = async { client.execute(request).await };
     let response = match guard {
         Some((vault, epoch)) => checked_send(request, vault, epoch).await?,
         None => request.await.map_err(|_| WD_NETWORK.to_string())?,
@@ -828,7 +911,7 @@ async fn fetch_remote(
     // Do not mistake an HTML/error body for a KDBX with a missing validator.
     let etag = upload_etag(
         response.headers(),
-        &validate_url(&config.url, allow_loopback_http)?,
+        &validate_config_url(&config.url, !config.s3_region.is_empty(), allow_loopback_http)?,
     )
     .ok();
     let etag_status = if etag.is_some() && strong_etag(response.headers()).is_err() {
@@ -886,20 +969,20 @@ fn build_put_request(
     bytes: Vec<u8>,
     allow_loopback_http: bool,
 ) -> Result<reqwest::Request, String> {
-    let url = validate_url(&config.url, allow_loopback_http)?;
+    let url = validate_config_url(&config.url, !config.s3_region.is_empty(), allow_loopback_http)?;
     validate_put_condition(condition, &url)?;
-    let mut request = client
-        .put(url)
-        .basic_auth(&config.username, Some(&config.password))
-        .header(header::CONTENT_TYPE, "application/octet-stream");
+    let mut request = client.put(url).header(header::CONTENT_TYPE, "application/octet-stream");
+    if config.s3_region.is_empty() { request = request.basic_auth(&config.username, Some(&config.password)); }
     request = match condition {
         RemoteCondition::IfMatch(etag) => request.header(header::IF_MATCH, etag),
         RemoteCondition::IfNoneMatch => request.header(header::IF_NONE_MATCH, "*"),
     };
-    request
+    let mut request = request
         .body(bytes)
         .build()
-        .map_err(|_| WD_SERVER.to_string())
+        .map_err(|_| WD_SERVER.to_string())?;
+    sign_s3(&mut request, config)?;
+    Ok(request)
 }
 
 async fn execute_put(
@@ -913,7 +996,7 @@ async fn execute_put(
         Some((vault, epoch)) => checked_send(send, vault, epoch).await?,
         None => send.await.map_err(|_| WD_NETWORK.to_string())?,
     };
-    if response.status() == StatusCode::PRECONDITION_FAILED {
+    if response.status() == StatusCode::PRECONDITION_FAILED || response.status() == StatusCode::CONFLICT {
         return Err(WD_REMOTE_CHANGED.to_string());
     }
     if !matches!(
@@ -1009,10 +1092,11 @@ pub async fn webdav_save_config(
     url: String,
     username: String,
     password: Option<String>,
+    s3_region: Option<String>,
 ) -> Result<ConfigView, String> {
     require_main(&window)?;
     let vault = canonical_vault_path(&vault_path)?;
-    validate_url(&url, false)?;
+    validate_config_url(&url, s3_region.as_deref().is_some_and(|region| !region.is_empty()), false)?;
     validate_username(&username)?;
     if let Some(ref password) = password {
         validate_password(password)?;
@@ -1020,7 +1104,7 @@ pub async fn webdav_save_config(
     invalidate(&vault)?;
     let path = profile_path(&app)?;
     let result = tauri::async_runtime::spawn_blocking(move || {
-        save_config(&path, &vault, &url, &username, password)
+        save_config_with_region(&path, &vault, &url, &username, password, s3_region.as_deref().unwrap_or(""))
     })
     .await
     .map_err(|_| WD_CONFIG_IO.to_string())?;
@@ -1062,7 +1146,7 @@ pub async fn webdav_test_connection(
     })
     .await
     .map_err(|_| WD_CONFIG_IO.to_string())??;
-    let client = make_client(false)?;
+    let client = make_client(!config.s3_region.is_empty())?;
     check_epoch(&vault, epoch)?;
     probe_remote(&client, &config, false, Some((&vault, epoch))).await
 }
@@ -1118,12 +1202,12 @@ pub async fn webdav_prepare_sync(
             .await
             .map_err(|_| WD_CONFIG_IO.to_string())??;
     check_epoch(&vault, epoch)?;
-    let client = make_client(false)?;
+    let client = make_client(!config.s3_region.is_empty())?;
     let remote = get_remote(&client, &config, false, Some((&vault, epoch))).await?;
     let condition = select_condition(
         remote.as_ref(),
         allow_create,
-        &validate_url(&config.url, false)?,
+        &validate_config_url(&config.url, !config.s3_region.is_empty(), false)?,
     )?;
     let check_path = path.clone();
     let check_vault = vault.clone();
@@ -1186,7 +1270,7 @@ pub async fn webdav_commit_sync(
         return Err(WD_CANCELLED.to_string());
     }
     check_epoch(&vault, epoch)?;
-    let client = make_client(false)?;
+    let client = make_client(!config.s3_region.is_empty())?;
     put_remote(
         &client,
         &config,
@@ -1232,6 +1316,19 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::thread;
 
+    #[test]
+    fn s3_signature_matches_independent_hmac_vector() {
+        use chrono::TimeZone;
+        let config = NetworkConfig { url: "https://s3.example.com/bucket/vault.kdbx".into(), username: "ACCESS".into(), password: "SECRET".into(), revision: 1, s3_region: "us-east-1".into() };
+        let mut request = Client::new().get(&config.url).build().unwrap();
+        sign_s3_at(&mut request, &config, chrono::Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap()).unwrap();
+        let auth = request.headers().get(header::AUTHORIZATION).unwrap().to_str().unwrap();
+        assert!(auth.ends_with("Signature=65c04ae55dfa5eacbf8f4415c0935595392d833e2408344f89ffa868354724db"));
+        let mut put = Client::new().put(&config.url).header(header::IF_MATCH, "\"old\"").body(fake_kdbx()).build().unwrap();
+        sign_s3_at(&mut put, &config, chrono::Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap()).unwrap();
+        assert!(put.headers().get(header::AUTHORIZATION).unwrap().to_str().unwrap().contains("SignedHeaders=host;if-match;x-amz-content-sha256;x-amz-date"));
+    }
+
     fn fake_kdbx() -> Vec<u8> {
         b"\x03\xd9\xa2\x9a\x67\xfb\x4b\xb5\x00\x00\x04\x00synthetic".to_vec()
     }
@@ -1275,6 +1372,7 @@ mod tests {
             username: "synthetic-user".into(),
             password: "synthetic password".into(),
             revision: 1,
+            s3_region: String::new(),
         }
     }
 
@@ -1306,6 +1404,15 @@ mod tests {
         assert_eq!(strong_etag(&headers).unwrap(), "\"v1\"");
         headers.append(header::ETAG, header::HeaderValue::from_static("\"v2\""));
         assert_eq!(strong_etag(&headers).unwrap_err(), WD_ETAG_REQUIRED);
+    }
+
+    #[test]
+    fn s3_http_requires_private_ip_and_webdav_stays_https_only() {
+        assert!(validate_config_url("http://192.168.10.5:9000/siyuan/vault.kdbx", true, false).is_ok());
+        assert!(validate_config_url("http://192.168.10.5:9000/siyuan/vault.kdbx", false, false).is_err());
+        assert!(validate_config_url("http://8.8.8.8/siyuan/vault.kdbx", true, false).is_err());
+        assert!(validate_config_url("http://example.com/siyuan/vault.kdbx", true, false).is_err());
+        assert!(validate_config_url("http://user@192.168.10.5:9000/siyuan/vault.kdbx", true, false).is_err());
     }
 
     #[test]

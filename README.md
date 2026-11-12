@@ -12,8 +12,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/JJong177/KeyTree/releases/download/v0.2.0/KeyTree-Setup.exe"><img src="https://img.shields.io/badge/下载-Windows_x64_v0.2.0-657650?style=flat-square" alt="下载 Windows x64 安装包 v0.2.0" height="28" /></a>
-  <a href="https://github.com/JJong177/KeyTree/releases/tag/v0.2.0"><img src="https://img.shields.io/badge/版本-发布说明-5c4033?style=flat-square" alt="查看发布说明" height="28" /></a>
+  <a href="https://github.com/yy1105384898/KeyTree/releases/download/v0.2.0-s3/KeyTree_0.2.0_x64-setup.exe"><img src="https://img.shields.io/badge/下载-Windows_x64_v0.2.0--s3-657650?style=flat-square" alt="下载 Windows x64 安装包 v0.2.0-s3" height="28" /></a>
+  <a href="https://github.com/yy1105384898/KeyTree/releases/tag/v0.2.0-s3"><img src="https://img.shields.io/badge/版本-发布说明-5c4033?style=flat-square" alt="查看发布说明" height="28" /></a>
   <a href="https://linux.do/"><img src="https://img.shields.io/badge/LINUX_DO-社区-ffb000?style=flat-square&amp;logo=discourse&amp;logoColor=white&amp;labelColor=555555" alt="LINUX DO 社区" height="28" /></a>
 </p>
 
@@ -87,7 +87,7 @@
 
 ### 1. 安装 KeyTree
 
-从 [GitHub Releases 下载 `KeyTree-Setup.exe`](https://github.com/JJong177/KeyTree/releases/download/v0.2.0/KeyTree-Setup.exe)，按向导安装后启动 **KeyTree**。安装版无需 Node.js、Rust 或开发服务器。安装包作为 Release 附件提供，不放在源码目录中；自行构建见下方“开发与构建”。
+从 [GitHub Releases 下载安装包](https://github.com/yy1105384898/KeyTree/releases/download/v0.2.0-s3/KeyTree_0.2.0_x64-setup.exe)，按向导安装后启动 **KeyTree**。安装版无需 Node.js、Rust 或开发服务器。安装包作为 Release 附件提供，不放在源码目录中；自行构建见下方“开发与构建”。
 
 - **系统依赖：** Microsoft Edge WebView2 Runtime；缺少时安装器会尝试联网补装。
 - **安装语言：** 简体中文或 English，仅影响安装向导，不改变应用界面语言。

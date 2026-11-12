@@ -4,6 +4,7 @@ export interface WebdavConfig {
   username: string;
   hasPassword: boolean;
   lastSyncedAt: number | null;
+  s3Region?: string;
 }
 export type WebdavEtagStatus = "nutstore-compatible" | "strong" | "missing" | "weak" | "invalid" | "not-checked";
 export function isNutstoreWebdavUrl(value: string): boolean {
@@ -31,7 +32,7 @@ export interface WebdavCommitted { uploadedStat: WebdavStat; syncedAt: number; m
 export type WebdavPhase = "unchecked" | "saving" | "downloading" | "merging" | "uploading" | "synced" | "pending" | "conflict" | "error" | "cancelled";
 export interface WebdavState { phase: WebdavPhase; message: string; lastSyncedAt: number | null }
 const messages: Record<string, string> = {
-  WD_INVALID_URL: "请填写完整的 HTTPS WebDAV .kdbx 文件地址，不含查询参数或账号密码；不能使用网页分享链接。",
+  WD_INVALID_URL: "请检查同步地址：WebDAV 使用 HTTPS 完整文件地址；S3 支持 HTTPS 或内网 IP 的 HTTP 地址。",
   WD_CREDENTIALS_REQUIRED: "请填写用户名和应用专用密码；更换账号或服务地址需重新授权。",
   WD_NOT_CONFIGURED: "请先保存 WebDAV 配置。",
   WD_CONFIG_IO: "本机同步配置无法读取或保存，请检查权限后重试。",
